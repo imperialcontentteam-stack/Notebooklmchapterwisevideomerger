@@ -191,119 +191,104 @@ def _has_audio(path):
     return bool(r.stdout.strip())
 
 
+def _is_end_card_frame(arr):
+    """
+    Return True if a (H, W, 3) uint8 numpy frame looks like a NotebookLM end card.
+    End cards are visually uniform (low std-dev) AND either:
+      - Mostly bright/white (mean > 190), or
+      - Mostly a single saturated colour (NotebookLM uses solid purple/teal bg variants)
+    """
+    if arr is None or arr.size == 0:
+        return False
+    f = arr.astype(float)
+    mean_brightness = f.mean()
+    std_all         = f.std()           # low = uniform solid colour
+    # Bright white-ish end card
+    if mean_brightness > 190 and std_all < 60:
+        return True
+    # Dark solid-colour end card (e.g. NotebookLM's purple variant)
+    if std_all < 45 and mean_brightness > 30:
+        return True
+    return False
+
+
 def _detect_end_card_start(path):
     """
-    Robust end-card detector for NotebookLM videos.
+    Scan EVERY SECOND of the video from the end backwards.
+    The moment we find a second that is NOT an end card, we know the
+    end card starts at the next second — that's our trim point.
 
-    Strategy (three passes, first match wins):
+    This is the most reliable possible approach: it works regardless of
+    end card colour, duration, or fade style.
 
-    Pass 1 — FFmpeg scene-score on last 25% of video (fast).
-      Uses FFmpeg's built-in scene change score (0-1). A score ≥ 0.30
-      near the end of the video almost always marks the end-card cut.
-      We take the LAST such cut, since late-video cuts are end-cards.
-
-    Pass 2 — Frame-similarity scan (reliable fallback).
-      Grabs a frame from well into the video as a "content reference",
-      then scans the last 25% second-by-second. When the sampled frame
-      diverges significantly AND the region becomes visually uniform
-      (low std-dev across pixels) we call it the end-card.
-
-    Pass 3 — Brightness scan with lower threshold (catches gradient cards).
-      Original logic but lowered to 80% of pixels > 200 mean brightness,
-      scanning the last 30% of the video instead of just 20 seconds.
-
-    If nothing is found, returns total-9.0 (conservative trim).
+    Steps:
+      1. Dump all frames at 1 fps into a temp folder using a single
+         FFmpeg call (much faster than one ffmpeg call per second).
+      2. Walk the frame list BACKWARDS.
+      3. First non-end-card frame found → trim = that timestamp + 1s.
+      4. If every frame in the last 60s looks like end card, trim at
+         total - 60s (safety guard against all-white slide decks).
     """
-    total    = _probe_duration(path)
-    # Scan window: last 25% of video, minimum 30s, maximum 120s
-    scan_from = max(0.0, total - max(30.0, min(120.0, total * 0.25)))
+    total = _probe_duration(path)
+    if total < 15:
+        return total  # too short to trim
 
-    # ── Pass 1: FFmpeg scene score ────────────────────────────────────
+    # How far back to scan: last 40% of video, max 90s
+    scan_secs = min(90, max(20, int(total * 0.40)))
+    scan_from = max(0.0, total - scan_secs)
+
+    fd_dir = tempfile.mkdtemp()
     try:
-        r = subprocess.run([
+        # Single FFmpeg call: extract 1 frame/sec from scan window
+        subprocess.run([
             "ffmpeg", "-y",
             "-ss", f"{scan_from:.2f}", "-i", str(path),
-            "-vf", "select='gte(scene,0.30)',showinfo",
-            "-vsync", "vfr", "-f", "null", "-"
-        ], capture_output=True, text=True, timeout=60)
-        # Parse timestamps from showinfo output
-        cuts = []
-        for line in r.stderr.splitlines():
-            if "pts_time:" in line:
-                try:
-                    pts = float(line.split("pts_time:")[1].split()[0])
-                    cuts.append(scan_from + pts)
-                except (ValueError, IndexError):
-                    pass
-        # Take the last scene cut that's at least 3s before the end
-        valid = [c for c in cuts if c < total - 3.0]
-        if valid:
-            return valid[-1]
-    except Exception:
-        pass
+            "-vf", "fps=1,scale=320:180",
+            "-q:v", "5",
+            os.path.join(fd_dir, "f%04d.jpg")
+        ], capture_output=True, timeout=120)
 
-    # ── Pass 2: Frame similarity + uniformity scan ────────────────────
-    try:
-        # Reference frame from early-mid video (avoid opening titles)
-        ref_t  = total * 0.3
-        fd, tf = tempfile.mkstemp(suffix=".jpg"); os.close(fd)
-        ref_arr = None
+        # Collect and sort frames
+        frames = sorted([
+            f for f in os.listdir(fd_dir) if f.endswith(".jpg")
+        ])
+
+        if not frames:
+            return max(0.0, total - 8.0)
+
+        # Load all frame arrays
+        frame_data = []
+        for fname in frames:
+            try:
+                arr = np.array(Image.open(os.path.join(fd_dir, fname)).convert("RGB"))
+                frame_data.append(arr)
+            except Exception:
+                frame_data.append(None)
+
+        n = len(frame_data)
+
+        # Walk BACKWARDS — find first non-end-card frame
+        for i in range(n - 1, -1, -1):
+            if not _is_end_card_frame(frame_data[i]):
+                # This frame is content — end card starts at i+1
+                trim_t = scan_from + i + 1
+                # Sanity: must leave at least 10s of content
+                if trim_t > 10 and trim_t < total - 1:
+                    return trim_t
+                break
+
+        # All frames looked like end card — trim at scan_from + 1s
+        # (protects against all-white slide decks being fully trimmed)
+        return max(10.0, scan_from + 1.0)
+
+    except Exception:
+        return max(0.0, total - 8.0)
+    finally:
         try:
-            subprocess.run(["ffmpeg", "-y", "-ss", f"{ref_t:.2f}", "-i", str(path),
-                "-vframes", "1", tf], capture_output=True, timeout=8)
-            ref_arr = np.array(Image.open(tf).convert("RGB").resize((192, 108))).astype(float)
+            import shutil
+            shutil.rmtree(fd_dir, ignore_errors=True)
         except Exception:
             pass
-        finally:
-            try: os.unlink(tf)
-            except: pass
-
-        if ref_arr is not None:
-            t = scan_from
-            while t < total - 1.0:
-                fd2, tf2 = tempfile.mkstemp(suffix=".jpg"); os.close(fd2)
-                try:
-                    subprocess.run(["ffmpeg", "-y", "-ss", f"{t:.2f}", "-i", str(path),
-                        "-vframes", "1", tf2], capture_output=True, timeout=8)
-                    frame = np.array(Image.open(tf2).convert("RGB").resize((192, 108))).astype(float)
-                    diff     = np.abs(frame - ref_arr).mean()   # divergence from content
-                    uniformity = frame.std()                     # low = visually uniform (card-like)
-                    # End card: very different from content AND visually uniform
-                    if diff > 40 and uniformity < 55:
-                        return t
-                except Exception:
-                    pass
-                finally:
-                    try: os.unlink(tf2)
-                    except: pass
-                t += 1.0   # 1s steps for speed
-    except Exception:
-        pass
-
-    # ── Pass 3: Brightness scan (lowered threshold, wider window) ────
-    try:
-        t = scan_from
-        while t < total - 1.0:
-            fd, tf = tempfile.mkstemp(suffix=".jpg"); os.close(fd)
-            try:
-                subprocess.run(["ffmpeg", "-y", "-ss", f"{t:.2f}", "-i", str(path),
-                    "-vframes", "1", tf], capture_output=True, timeout=8)
-                a = np.array(Image.open(tf))
-                if len(a.shape) == 3:
-                    bright_ratio = (a.mean(axis=2) > 200).sum() / (a.shape[0] * a.shape[1])
-                    if bright_ratio > 0.80:
-                        return t
-            except Exception:
-                pass
-            finally:
-                try: os.unlink(tf)
-                except: pass
-            t += 0.5
-    except Exception:
-        pass
-
-    # Nothing found — conservative fallback
-    return max(0.0, total - 9.0)
 
 
 def _overlay_on_template(png_path, out_path, y_expr, timeout=90):
@@ -474,18 +459,13 @@ def remove_notebooklm_watermark(inp, out, src_resolution, tmp, progress_cb=None)
     # Trim if end card detected AND it leaves at least 5s of real content
     # AND it is not just the fallback value (total-9)
     fallback = max(0.0, duration - 9.0)
-    # NotebookLM ALWAYS has an end card — if detector finds nothing confident,
-    # fall back to trimming the last 8s (safe for all video lengths > 30s).
-    MIN_CONTENT = 15.0   # never trim if < 15s of content would remain
-    if ecs < duration - 2.0 and ecs > MIN_CONTENT:
+    # Detector always returns a trim point — apply it if it leaves enough content
+    MIN_CONTENT = 10.0
+    if ecs > MIN_CONTENT and ecs < duration - 1.0:
         trim_at = ecs
-        if progress_cb: progress_cb(f"✂️ End card detected at {ecs:.1f}s — trimming…")
-    elif duration > MIN_CONTENT + 8:
-        # Detection failed or returned fallback — trim last 8s guaranteed
-        trim_at = duration - 8.0
-        if progress_cb: progress_cb(f"✂️ Detection uncertain — trimming last 8s at {trim_at:.1f}s…")
+        if progress_cb: progress_cb(f"✂️ Trimming end card at {trim_at:.1f}s ({duration - trim_at:.1f}s removed)…")
     else:
-        if progress_cb: progress_cb("ℹ️ Video too short to trim safely — keeping full")
+        if progress_cb: progress_cb("ℹ️ Video too short to trim — keeping full")
     use_logo = SLC_LOGO.exists() and SLC_LOGO.stat().st_size>500
     if progress_cb: progress_cb("Detecting top watermark duration…")
     top_end = _detect_top_watermark_end(inp_str)

@@ -515,26 +515,26 @@ def add_notebooklm_transition(intro, main, out, duration=1.0, direction="left"):
           "drawbox=x=1037:y=0:w=346:h=1080:color=0x7EDFC3:t=fill,"
           "drawbox=x=1383:y=0:w=537:h=1080:color=0xB7E4C7:t=fill")
 
-    # Always provide explicit silent sources for intro/main audio
-    # so filter_complex stream specifiers are never ambiguous.
-    # Input layout:
+    main_d  = _probe_duration(main)
+    total_d = intro_d + main_d  # upper bound for silent pad durations
+
+    # Input layout (all lavfi inputs have explicit -t to avoid infinite hang):
     #   0 = intro video
     #   1 = main video
-    #   2 = colour card (lavfi video)
-    #   3 = silent pad for transition colour card audio
-    #   4 = silent pad for intro  (used if intro has no audio)
-    #   5 = silent pad for main   (used if main  has no audio)
+    #   2 = colour card  (lavfi, -t duration)
+    #   3 = silent pad   (lavfi, -t duration)  — for colour card audio
+    #   4 = silent pad   (lavfi, -t intro_d)   — fallback intro audio
+    #   5 = silent pad   (lavfi, -t main_d)    — fallback main  audio
     cmd = [
         "ffmpeg", "-y",
         "-i", str(intro),
         "-i", str(main),
-        "-f", "lavfi", "-t", f"{duration}", "-i", cc,
-        "-f", "lavfi", "-t", f"{duration}", "-i", "anullsrc=r=48000:cl=stereo",
-        "-f", "lavfi", "-t", f"{intro_d}",  "-i", "anullsrc=r=48000:cl=stereo",
-        "-f", "lavfi",                       "-i", "anullsrc=r=48000:cl=stereo",
+        "-f", "lavfi", "-t", f"{duration}",  "-i", cc,
+        "-f", "lavfi", "-t", f"{duration}",  "-i", "anullsrc=r=48000:cl=stereo",
+        "-f", "lavfi", "-t", f"{intro_d:.4f}","-i", "anullsrc=r=48000:cl=stereo",
+        "-f", "lavfi", "-t", f"{main_d:.4f}", "-i", "anullsrc=r=48000:cl=stereo",
     ]
 
-    # Pick correct audio stream for intro and main
     a0 = "0:a" if intro_has_audio else "4:a"
     a1 = "1:a" if main_has_audio  else "5:a"
 
@@ -554,9 +554,10 @@ def add_notebooklm_transition(intro, main, out, duration=1.0, direction="left"):
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
         "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
         "-r", "30", "-pix_fmt", "yuv420p",
+        "-shortest",   # hard stop — no stream can hang indefinitely
         str(out)
     ]
-    _ff(cmd, timeout=180)
+    _ff(cmd, timeout=max(600, int(total_d * 8)))
     return Path(out)
 
 

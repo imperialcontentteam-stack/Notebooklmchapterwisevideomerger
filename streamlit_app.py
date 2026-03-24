@@ -503,28 +503,60 @@ def remove_notebooklm_watermark(inp, out, src_resolution, tmp, progress_cb=None)
 
 def add_notebooklm_transition(intro, main, out, duration=1.0, direction="left"):
     tm = {"left":"wipeleft","right":"wiperight","up":"wipeup","down":"wipedown"}
-    wipe = tm.get(direction,"wipeleft"); intro_d = _probe_duration(intro)
-    half = max(0.25, min(duration/2, intro_d-0.05))
+    wipe     = tm.get(direction, "wipeleft")
+    intro_d  = _probe_duration(intro)
+    half     = max(0.25, min(duration / 2, intro_d - 0.05))
+    intro_has_audio = _has_audio(intro)
+    main_has_audio  = _has_audio(main)
+
     cc = ("color=c=0x7B2CBF:s=1920x1080:r=30,"
           "drawbox=x=0:y=0:w=576:h=1080:color=0x7B2CBF:t=fill,"
           "drawbox=x=576:y=0:w=461:h=1080:color=0x4285F4:t=fill,"
           "drawbox=x=1037:y=0:w=346:h=1080:color=0x7EDFC3:t=fill,"
           "drawbox=x=1383:y=0:w=537:h=1080:color=0xB7E4C7:t=fill")
-    _ff(["ffmpeg","-y","-i",str(intro),"-i",str(main),
-         "-f","lavfi","-t",f"{duration}","-i",cc,
-         "-f","lavfi","-t",f"{duration}","-i","anullsrc=r=48000:cl=stereo",
-         "-filter_complex",
-         "[0:v]fps=30,format=yuv420p,settb=AVTB[v0];"
-         "[1:v]fps=30,format=yuv420p,settb=AVTB[v1];"
-         "[2:v]fps=30,format=yuv420p,settb=AVTB[vc];"
-         f"[v0][vc]xfade=transition={wipe}:duration={half}:offset={max(intro_d-half,0):.3f}[vx];"
-         f"[vx][v1]xfade=transition={wipe}:duration={half}:offset={intro_d:.3f}[vout];"
-         f"[0:a][3:a]acrossfade=d={half}:c1=tri:c2=tri[ax];"
-         f"[ax][1:a]acrossfade=d={half}:c1=tri:c2=tri[aout]",
-         "-map","[vout]","-map","[aout]",
-         "-c:v","libx264","-preset","ultrafast","-crf","23",
-         "-c:a","aac","-b:a","128k","-ar","48000","-ac","2",
-         "-r","30","-pix_fmt","yuv420p",str(out)], timeout=180)
+
+    # Always provide explicit silent sources for intro/main audio
+    # so filter_complex stream specifiers are never ambiguous.
+    # Input layout:
+    #   0 = intro video
+    #   1 = main video
+    #   2 = colour card (lavfi video)
+    #   3 = silent pad for transition colour card audio
+    #   4 = silent pad for intro  (used if intro has no audio)
+    #   5 = silent pad for main   (used if main  has no audio)
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(intro),
+        "-i", str(main),
+        "-f", "lavfi", "-t", f"{duration}", "-i", cc,
+        "-f", "lavfi", "-t", f"{duration}", "-i", "anullsrc=r=48000:cl=stereo",
+        "-f", "lavfi", "-t", f"{intro_d}",  "-i", "anullsrc=r=48000:cl=stereo",
+        "-f", "lavfi",                       "-i", "anullsrc=r=48000:cl=stereo",
+    ]
+
+    # Pick correct audio stream for intro and main
+    a0 = "0:a" if intro_has_audio else "4:a"
+    a1 = "1:a" if main_has_audio  else "5:a"
+
+    fc = (
+        "[0:v]fps=30,format=yuv420p,settb=AVTB[v0];"
+        "[1:v]fps=30,format=yuv420p,settb=AVTB[v1];"
+        "[2:v]fps=30,format=yuv420p,settb=AVTB[vc];"
+        f"[v0][vc]xfade=transition={wipe}:duration={half}:offset={max(intro_d-half,0):.3f}[vx];"
+        f"[vx][v1]xfade=transition={wipe}:duration={half}:offset={intro_d:.3f}[vout];"
+        f"[{a0}][3:a]acrossfade=d={half}:c1=tri:c2=tri[ax];"
+        f"[ax][{a1}]acrossfade=d={half}:c1=tri:c2=tri[aout]"
+    )
+
+    cmd += [
+        "-filter_complex", fc,
+        "-map", "[vout]", "-map", "[aout]",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
+        "-r", "30", "-pix_fmt", "yuv420p",
+        str(out)
+    ]
+    _ff(cmd, timeout=180)
     return Path(out)
 
 

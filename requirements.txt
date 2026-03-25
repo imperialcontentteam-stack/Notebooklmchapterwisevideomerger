@@ -3,3 +3,5 @@ Pillow>=10.0
 numpy
 msal
 requests
+paddlepaddle==2.5.2
+paddleocr==2.7.3

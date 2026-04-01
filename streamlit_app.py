@@ -794,7 +794,11 @@ else:
                             st.success(f"✅ [Open in Dropbox]({result})"); st.rerun()
                         else: st.error(result)
                 else:
-                    st.markdown(f'<a href="{item["dbx_url"]}" target="_blank" style="color:#50c878;font-size:13px">✅ On Dropbox</a>', unsafe_allow_html=True)
+                    url = item["dbx_url"]
+                    if url.startswith("https://"):
+                        st.link_button("✅ On Dropbox", url, use_container_width=False)
+                    else:
+                        st.markdown('<span style="color:#50c878;font-size:13px">✅ Uploaded</span>', unsafe_allow_html=True)
 
     st.markdown("")
     qc1, qc2, qc3 = st.columns([2,1,1])
@@ -846,5 +850,7 @@ if done_items:
             c1, c2 = st.columns(2)
             with c1: st.download_button("⬇ Download", data=item["result_data"], file_name=item["result_filename"], mime="video/mp4", use_container_width=True, key=f"dlp_{item['id']}")
             with c2:
-                if item.get("dbx_url") and item["dbx_url"]!="error":
-                    st.markdown(f'<a href="{item["dbx_url"]}" target="_blank" style="color:#0061FF;font-size:14px;font-weight:600">📦 View on Dropbox</a>', unsafe_allow_html=True)
+                if item.get("dbx_url") and item["dbx_url"]!="error" and item["dbx_url"].startswith("https://"):
+                    st.link_button("📦 View on Dropbox", item["dbx_url"], use_container_width=True)
+                elif item.get("dbx_url") and item["dbx_url"]!="error":
+                    st.markdown('<span style="color:#50c878;font-size:14px">✅ Uploaded to Dropbox</span>', unsafe_allow_html=True)

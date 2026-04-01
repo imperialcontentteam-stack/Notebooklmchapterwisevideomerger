@@ -521,11 +521,18 @@ def _dropbox_upload(dbx, data, filename, folder, status_cb=None):
     dropbox_path = f"{folder}/{safe_name}"
     CHUNK = 8 * 1024 * 1024; total = len(data)
     try:
-        try: dbx.files_get_metadata(folder)
+        # Create folder if it doesn't exist (no metadata.read permission needed)
+        try:
+            _cb(f"📁 Ensuring folder exists: {folder}")
+            dbx.files_create_folder_v2(folder)
         except ApiError as e:
-            if e.error.is_path() and e.error.get_path().is_not_found():
-                _cb(f"📁 Creating folder: {folder}"); dbx.files_create_folder_v2(folder)
-            else: raise
+            # Folder already exists — that's fine, continue
+            if hasattr(e.error, 'is_path') and e.error.is_path():
+                pass  # folder exists
+            elif 'conflict' in str(e).lower() or 'already' in str(e).lower():
+                pass  # folder exists
+            else:
+                _cb(f"⚠️ Folder check: {e} — trying upload anyway")
         if total <= CHUNK:
             _cb(f"⬆️ Uploading {total // 1048576} MB…")
             dbx.files_upload(data, dropbox_path, mode=WriteMode.overwrite, mute=True)

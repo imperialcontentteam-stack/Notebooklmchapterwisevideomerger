@@ -521,18 +521,8 @@ def _dropbox_upload(dbx, data, filename, folder, status_cb=None):
     dropbox_path = f"{folder}/{safe_name}"
     CHUNK = 8 * 1024 * 1024; total = len(data)
     try:
-        # Create folder if it doesn't exist (no metadata.read permission needed)
-        try:
-            _cb(f"📁 Ensuring folder exists: {folder}")
-            dbx.files_create_folder_v2(folder)
-        except ApiError as e:
-            # Folder already exists — that's fine, continue
-            if hasattr(e.error, 'is_path') and e.error.is_path():
-                pass  # folder exists
-            elif 'conflict' in str(e).lower() or 'already' in str(e).lower():
-                pass  # folder exists
-            else:
-                _cb(f"⚠️ Folder check: {e} — trying upload anyway")
+        # Upload directly — Dropbox auto-creates parent folders
+        # No folder check needed (avoids files.metadata.read permission)
         if total <= CHUNK:
             _cb(f"⬆️ Uploading {total // 1048576} MB…")
             dbx.files_upload(data, dropbox_path, mode=WriteMode.overwrite, mute=True)
@@ -557,13 +547,11 @@ def _dropbox_upload(dbx, data, filename, folder, status_cb=None):
         try:
             shared = dbx.sharing_create_shared_link_with_settings(dropbox_path); return True, shared.url
         except ApiError as e:
-            # Link might already exist
             try:
                 if e.error.is_shared_link_already_exists():
                     links = dbx.sharing_list_shared_links(path=dropbox_path, direct_only=True)
                     if links.links: return True, links.links[0].url
             except: pass
-            # Fallback: construct a working Dropbox web URL
             import urllib.parse
             encoded_path = urllib.parse.quote(dropbox_path)
             return True, f"https://www.dropbox.com/home{encoded_path}"

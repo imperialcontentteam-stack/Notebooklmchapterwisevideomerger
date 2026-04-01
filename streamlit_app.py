@@ -546,13 +546,24 @@ def _dropbox_upload(dbx, data, filename, folder, status_cb=None):
                     dbx.files_upload_session_append_v2(chunk, cursor); cursor.offset = chunk_end
                 offset = chunk_end
         _cb(f"✅ Upload complete! ({total // 1048576} MB)")
+        # Try to create a shared link for easy browser access
         try:
             shared = dbx.sharing_create_shared_link_with_settings(dropbox_path); return True, shared.url
         except ApiError as e:
-            if e.error.is_shared_link_already_exists():
-                links = dbx.sharing_list_shared_links(path=dropbox_path, direct_only=True)
-                if links.links: return True, links.links[0].url
-            return True, f"dropbox://{dropbox_path}"
+            # Link might already exist
+            try:
+                if e.error.is_shared_link_already_exists():
+                    links = dbx.sharing_list_shared_links(path=dropbox_path, direct_only=True)
+                    if links.links: return True, links.links[0].url
+            except: pass
+            # Fallback: construct a working Dropbox web URL
+            import urllib.parse
+            encoded_path = urllib.parse.quote(dropbox_path)
+            return True, f"https://www.dropbox.com/home{encoded_path}"
+        except Exception:
+            import urllib.parse
+            encoded_path = urllib.parse.quote(dropbox_path)
+            return True, f"https://www.dropbox.com/home{encoded_path}"
     except AuthError: return False, "❌ Dropbox authentication expired. Please reconnect."
     except ApiError as e: return False, f"❌ Dropbox API error: {e}"
     except Exception as e: return False, f"❌ Upload error: {e}"

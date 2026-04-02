@@ -60,7 +60,7 @@ MS_AUTHORITY = st.secrets.get("MS_AUTHORITY", "https://login.microsoftonline.com
 TEAL, WHITE = (96, 204, 190), (255, 255, 255)
 
 # ── Folder rotation config ────────────────────────────────────────────────
-FOLDER_MAX_ITEMS = 1   # temporarily set to 1 for testing (change back to 100 for production)
+FOLDER_MAX_ITEMS = 50   # create a new batch folder after this many files
 
 
 def _font(name):
